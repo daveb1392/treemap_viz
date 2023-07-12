@@ -1,192 +1,165 @@
-import * as d3 from 'd3'
-import { formatType, handleErrors } from '../common/utils'
-
-import {
-  Row,
-  Looker,
-  VisualizationDefinition
-} from '../types/types'
-
-declare var looker: Looker
-
-interface TreemapVisualization extends VisualizationDefinition {
-  svg?: d3.Selection<SVGElement, {}, any, any>,
-}
-
-function descend(obj: any, depth: number = 0) {
-  const arr: any[] = []
-  for (const k in obj) {
-    if (k === '__data') {
-      continue
-    }
-    const child: any = {
-      name: k,
-      depth,
-      children: descend(obj[k], depth + 1)
-    }
-    if ('__data' in obj[k]) {
-      child.data = obj[k].__data
-    }
-    arr.push(child)
-  }
-  return arr
-}
-
-function burrow(table: Row[]) {
-  const obj: any = {}
-
-  table.forEach((row: Row) => {
-    let layer = obj
-    row.taxonomy.value.forEach((key: any) => {
-      layer[key] = key in layer ? layer[key] : {}
-      layer = layer[key]
-    })
-    layer.__data = row
-  })
-
-  return {
-    name: 'root',
-    children: descend(obj, 1),
-    depth: 0
-  }
-}
-
-const vis: TreemapVisualization = {
-  id: 'treemap',
-  label: 'Treemap',
-  options: {
-    color_range: {
-      type: 'array',
-      label: 'Color Range',
-      display: 'colors',
-      default: ['#dd3333', '#80ce5d', '#f78131', '#369dc1', '#c572d3', '#36c1b3', '#b57052', '#ed69af']
-    }
-  },
-  create: function (element, config) {
-    this.svg = d3.select(element).append('svg')
-  },
-  update: function (data, element, config, queryResponse) {
-    if (!handleErrors(this, queryResponse, {
-      min_pivots: 0, max_pivots: 0,
-      min_dimensions: 1, max_dimensions: undefined,
-      min_measures: 1, max_measures: 1
-    })) return
-
-    const width = element.clientWidth
-    const height = element.clientHeight
-
-    const dimensions = queryResponse.fields.dimension_like
-    const measure = queryResponse.fields.measure_like[0]
-
-    const format = formatType(measure.value_format) || ((s: any): string => s.toString())
-
-    const colorScale: d3.ScaleOrdinal<string, null> = d3.scaleOrdinal()
-    const color = colorScale.range(config.color_range)
-
-    data.forEach((row: Row) => {
-      row.taxonomy = {
-        value: dimensions.map((dimension) => row[dimension.name].value)
-      }
-    })
-
-    const treemap = d3.treemap()
-      .size([width, height - 16])
-      .tile(d3.treemapSquarify.ratio(1))
-      .paddingOuter(1)
-      .paddingTop((d) => {
-        return d.depth === 1 ? 16 : 0
-      })
-      .paddingInner(1)
-      .round(true)
-
-    const svg = this.svg!
-      .html('')
-      .attr('width', '100%')
-      .attr('height', '100%')
-      .append('g')
-      .attr('transform', 'translate(0,16)')
-
-    const breadcrumb = svg.append('text')
-      .attr('y', -5)
-      .attr('x', 4)
-
-    const root = d3.hierarchy(burrow(data)).sum((d: any) => {
-      return 'data' in d ? d.data[measure.name].value : 0
-    })
-    treemap(root)
-
-    const cell = svg.selectAll('.node')
-      .data(root.descendants())
-      .enter().append('g')
-      .attr('transform', (d: any) => 'translate(' + d.x0 + ',' + d.y0 + ')')
-      .attr('class', (d, i) => 'node depth-' + d.depth)
-      .style('stroke-width', 1.5)
-      .style('cursor', 'pointer')
-      .on('click', (d: any, event) => {
-        if (d.data.__data) {
-          looker.plugins.visualizations.actions.drill({
-            links: d.data.__data.links,
-            event: event,
-          });
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+var d3 = require("d3");
+var utils_1 = require("../common/utils");
+function descend(obj, depth) {
+    if (depth === void 0) { depth = 0; }
+    var arr = [];
+    for (var k in obj) {
+        if (k === '__data') {
+            continue;
         }
-      })
-      .on('mouseenter', (d: any) => {
-        const ancestors = d.ancestors()
-        breadcrumb.text(
-          ancestors.map((p: any) => p.data.name)
-            .slice(0, -1)
-            .reverse()
-            .join('-') + ': ' + format(d.value)
-        )
-        svg.selectAll('g.node rect')
-          .style('stroke', null)
-          .filter((p: any) => ancestors.indexOf(p) > -1)
-          .style('stroke', '#fff')
-      })
-      .on('mouseleave', (d) => {
-        breadcrumb.text('')
-        svg.selectAll('g.node rect')
-          .style('stroke', (d) => {
-            return null
-          })
-      })
-
-    cell.append('rect')
-      .attr('id', (d, i) => 'rect-' + i)
-      .attr('width', (d: any) => d.x1 - d.x0)
-      .attr('height', (d: any) => d.y1 - d.y0)
-      .style('fill', (d) => {
-        if (d.depth === 0) return 'none'
-        const ancestor: string = d.ancestors().map((p) => p.data.name).slice(-2, -1)[0]
-        const colors: any[] = [color(ancestor), '#ddd']
-        const scale = d3.scaleLinear()
-          .domain([1, 6.5])
-          .range(colors)
-        return scale(d.depth)
-      })
-
-    cell.append('clipPath')
-      .attr('id', (d, i) => 'clip-' + i)
-      .append('use')
-      .attr('xlink:href', (d, i) => '#rect-' + i)
-
-    cell.append('text')
-      .style('opacity', (d) => {
-        if (d.depth === 1) return 1
-        return 0
-      })
-      .attr('clip-path', (d, i) => 'url(#clip-' + i + ')')
-      .attr('y', (d) => {
-        return d.depth === 1 ? '13' : '10'
-      })
-      .attr('x', 2)
-      .style('font-family', 'Helvetica, Arial, sans-serif')
-      .style('fill', 'white')
-      .style('font-size', (d) => {
-        return d.depth === 1 ? '14px' : '10px'
-      })
-      .text((d) => d.data.name === 'root' ? '' : d.data.name)
-  }
+        var child = {
+            name: k,
+            depth: depth,
+            children: descend(obj[k], depth + 1)
+        };
+        if ('__data' in obj[k]) {
+            child.data = obj[k].__data;
+        }
+        arr.push(child);
+    }
+    return arr;
 }
-
-looker.plugins.visualizations.add(vis)
+function burrow(table) {
+    var obj = {};
+    table.forEach(function (row) {
+        var layer = obj;
+        row.taxonomy.value.forEach(function (key) {
+            layer[key] = key in layer ? layer[key] : {};
+            layer = layer[key];
+        });
+        layer.__data = row;
+    });
+    return {
+        name: 'root',
+        children: descend(obj, 1),
+        depth: 0
+    };
+}
+var vis = {
+    id: 'treemap',
+    label: 'Treemap',
+    options: {
+        color_range: {
+            type: 'array',
+            label: 'Color Range',
+            display: 'colors',
+            default: ['#dd3333', '#80ce5d', '#f78131', '#369dc1', '#c572d3', '#36c1b3', '#b57052', '#ed69af']
+        }
+    },
+    create: function (element, config) {
+        this.svg = d3.select(element).append('svg');
+    },
+    update: function (data, element, config, queryResponse) {
+        if (!(0, utils_1.handleErrors)(this, queryResponse, {
+            min_pivots: 0, max_pivots: 0,
+            min_dimensions: 1, max_dimensions: undefined,
+            min_measures: 1, max_measures: 1
+        }))
+            return;
+        var width = element.clientWidth;
+        var height = element.clientHeight;
+        var dimensions = queryResponse.fields.dimension_like;
+        var measure = queryResponse.fields.measure_like[0];
+        var format = (0, utils_1.formatType)(measure.value_format) || (function (s) { return s.toString(); });
+        var colorScale = d3.scaleOrdinal();
+        var color = colorScale.range(config.color_range);
+        data.forEach(function (row) {
+            row.taxonomy = {
+                value: dimensions.map(function (dimension) { return row[dimension.name].value; })
+            };
+        });
+        var treemap = d3.treemap()
+            .size([width, height - 16])
+            .tile(d3.treemapSquarify.ratio(1))
+            .paddingOuter(1)
+            .paddingTop(function (d) {
+            return d.depth === 1 ? 16 : 0;
+        })
+            .paddingInner(1)
+            .round(true);
+        var svg = this.svg
+            .html('')
+            .attr('width', '100%')
+            .attr('height', '100%')
+            .append('g')
+            .attr('transform', 'translate(0,16)');
+        var breadcrumb = svg.append('text')
+            .attr('y', -5)
+            .attr('x', 4);
+        var root = d3.hierarchy(burrow(data)).sum(function (d) {
+            return 'data' in d ? d.data[measure.name].value : 0;
+        });
+        treemap(root);
+        var cell = svg.selectAll('.node')
+            .data(root.descendants())
+            .enter().append('g')
+            .attr('transform', function (d) { return 'translate(' + d.x0 + ',' + d.y0 + ')'; })
+            .attr('class', function (d, i) { return 'node depth-' + d.depth; })
+            .style('stroke-width', 1.5)
+            .style('cursor', 'pointer')
+            .on('click', function (d, event) {
+            if (d.data.__data) {
+                looker.plugins.visualizations.actions.drill({
+                    links: d.data.__data.links,
+                    event: event,
+                });
+            }
+        })
+            .on('mouseenter', function (d) {
+            var ancestors = d.ancestors();
+            breadcrumb.text(ancestors.map(function (p) { return p.data.name; })
+                .slice(0, -1)
+                .reverse()
+                .join('-') + ': ' + format(d.value));
+            svg.selectAll('g.node rect')
+                .style('stroke', null)
+                .filter(function (p) { return ancestors.indexOf(p) > -1; })
+                .style('stroke', '#fff');
+        })
+            .on('mouseleave', function (d) {
+            breadcrumb.text('');
+            svg.selectAll('g.node rect')
+                .style('stroke', function (d) {
+                return null;
+            });
+        });
+        cell.append('rect')
+            .attr('id', function (d, i) { return 'rect-' + i; })
+            .attr('width', function (d) { return d.x1 - d.x0; })
+            .attr('height', function (d) { return d.y1 - d.y0; })
+            .style('fill', function (d) {
+            if (d.depth === 0)
+                return 'none';
+            var ancestor = d.ancestors().map(function (p) { return p.data.name; }).slice(-2, -1)[0];
+            var colors = [color(ancestor), '#ddd'];
+            var scale = d3.scaleLinear()
+                .domain([1, 6.5])
+                .range(colors);
+            return scale(d.depth);
+        });
+        cell.append('clipPath')
+            .attr('id', function (d, i) { return 'clip-' + i; })
+            .append('use')
+            .attr('xlink:href', function (d, i) { return '#rect-' + i; });
+        cell.append('text')
+            .style('opacity', function (d) {
+            if (d.depth === 1)
+                return 1;
+            return 0;
+        })
+            .attr('clip-path', function (d, i) { return 'url(#clip-' + i + ')'; })
+            .attr('y', function (d) {
+            return d.depth === 1 ? '13' : '10';
+        })
+            .attr('x', 2)
+            .style('font-family', 'Helvetica, Arial, sans-serif')
+            .style('fill', 'white')
+            .style('font-size', function (d) {
+            return d.depth === 1 ? '14px' : '10px';
+        })
+            .text(function (d) { return d.data.name === 'root' ? '' : d.data.name; });
+    }
+};
+looker.plugins.visualizations.add(vis);
